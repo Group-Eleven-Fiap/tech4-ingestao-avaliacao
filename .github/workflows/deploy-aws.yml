@@ -46,7 +46,7 @@ jobs:
         run: |
           aws lambda update-function-code \
             --function-name ingestao-avaliacao \
-            --zip-file fileb://target/ingestao-avaliacao-0.0.1-SNAPSHOT-shaded.jar \
+            --zip-file fileb://target/ingestao-avaliacao-0.0.1-SNAPSHOT.jar \
             --region us-east-1
 
       - name: Aguardar atualização
