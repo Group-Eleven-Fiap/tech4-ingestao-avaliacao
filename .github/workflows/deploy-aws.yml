@@ -31,7 +31,10 @@ jobs:
           cache: maven
 
       - name: Build e testes
-        run: mvn -B clean verify
+        run: |
+          mvn -B clean verify
+          echo "JARs gerados pelo Maven:"
+          ls -lh target/*.jar
 
       - name: Configurar credenciais AWS
         uses: aws-actions/configure-aws-credentials@v4
