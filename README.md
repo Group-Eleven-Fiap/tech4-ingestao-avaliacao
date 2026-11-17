@@ -161,11 +161,21 @@ sam build
 sam deploy --stack-name tech4-ingestao-avaliacao --region us-east-1 --resolve-s3 --capabilities CAPABILITY_IAM --parameter-overrides AdminEmail=admin@exemplo.com
 ```
 
-Teste da API implantada (use o valor de `UrlDaApi`):
+Teste da API implantada (use o valor de `UrlDaApi`). O corpo vai em um arquivo porque o PowerShell remove as aspas de argumentos JSON, e o arquivo deve ser gravado sem BOM:
 
 ```powershell
-curl.exe -X POST "<UrlDaApi>" -H "Content-Type: application/json" --data-binary "@avaliacao.json"
+$url = "<UrlDaApi>"
+[System.IO.File]::WriteAllText("$PWD\avaliacao.json", '{"descricao": "A aula estava sem áudio.", "nota": 2}')
+curl.exe -s -w "`nHTTP %{http_code}`n" -X POST $url -H "Content-Type: application/json" --data-binary "@avaliacao.json"
 ```
+
+A resposta esperada é `201` com o `id`. Como a nota é crítica (0 a 4), a mensagem vai para a fila e o administrador recebe o e-mail de urgência. Uma nota fora do intervalo (por exemplo, `11`) retorna `400`. Para acompanhar:
+
+```powershell
+aws logs tail /aws/lambda/ingestao-avaliacao --region us-east-1 --since 10m
+```
+
+O log mostra `ingestao.inicio`, `ingestao.gravada` e `ingestao.notificacao_publicada`.
 
 ## Build e testes
 
@@ -176,7 +186,7 @@ Pré-requisito: JDK 21.
 .\mvnw.cmd package
 ```
 
-Os testes cobrem a classificação de urgência, as validações e respostas HTTP, o JSON da fila (inclusive descrição com aspas) e a falha do SQS. Nenhum deles acessa a AWS.
+São 18 testes unitários: classificação de urgência, validações e respostas HTTP, o JSON da fila (inclusive descrição com aspas), a gravação no DynamoDB e a falha do SQS. Nenhum deles acessa a AWS. Eles rodam no pipeline antes de cada deploy.
 
 ## Execução local com o AWS Emulator
 
