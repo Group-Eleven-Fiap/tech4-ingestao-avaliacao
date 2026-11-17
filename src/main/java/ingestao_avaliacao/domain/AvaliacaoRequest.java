@@ -1,5 +1,8 @@
 package ingestao_avaliacao.domain;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class AvaliacaoRequest {
 
     private String descricao;

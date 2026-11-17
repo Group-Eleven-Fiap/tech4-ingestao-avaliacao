@@ -31,3 +31,9 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### AWS Emulator / SAM / build ###
+.aws-emulator/
+.aws-sam/
+dependency-reduced-pom.xml
+samconfig.toml

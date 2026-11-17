@@ -1,5 +1,7 @@
 package ingestao_avaliacao.domain;
 
+import ingestao_avaliacao.exception.AvaliacaoInvalidaException;
+
 public enum UrgenciaEnum {
 
     CRITICA(0, 4),
@@ -17,7 +19,7 @@ public enum UrgenciaEnum {
     // Método utilitário para descobrir a urgência com base na nota informada
     public static UrgenciaEnum fromNota(int nota) {
         if (nota < 0 || nota > 10) {
-            throw new IllegalArgumentException("A nota deve ser um valor inteiro entre 0 e 10.");
+            throw new AvaliacaoInvalidaException("A nota deve ser um valor inteiro entre 0 e 10.");
         }
 
         for (UrgenciaEnum urgencia : values()) {
@@ -25,6 +27,6 @@ public enum UrgenciaEnum {
                 return urgencia;
             }
         }
-        throw new IllegalArgumentException("Nota inválida para classificação de urgência.");
+        throw new AvaliacaoInvalidaException("Nota inválida para classificação de urgência.");
     }
 }

@@ -1,0 +1,243 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Tech Challenge Fase 4 - Ingestao de avaliacoes (API Gateway -> Lambda -> DynamoDB / SQS)
+
+Parameters:
+  AdminEmail:
+    Type: String
+    Description: E-mail do administrador que recebe os alarmes (a AWS envia um e-mail de confirmacao da inscricao)
+  TabelaAvaliacoes:
+    Type: String
+    Default: Avaliacoes
+    Description: Nome da tabela DynamoDB. O tech4-relatorio-semanal le a tabela por este nome
+
+Resources:
+  # Banco de dados de apoio: criado aqui para a infraestrutura ficar toda em codigo
+  TabelaAvaliacoesDynamoDB:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref TabelaAvaliacoes
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  IngestaoAvaliacaoLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/ingestao-avaliacao
+      RetentionInDays: 14
+
+  IngestaoAvaliacaoRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: menor-privilegio
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Somente gravacao de itens: a ingestao nunca le nem apaga avaliacoes
+              - Sid: GravarAvaliacoes
+                Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt TabelaAvaliacoesDynamoDB.Arn
+              # A fila e criada pelo stack tech4-notificacao-urgencia, que deve ser implantado antes
+              - Sid: PublicarAvaliacaoCritica
+                Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !ImportValue tech4-filas-notificacoes-criticas-arn
+              - Sid: EscreverLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt IngestaoAvaliacaoLogGroup.Arn
+              - Sid: EnviarTracesXRay
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+
+  AvaliacaoApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: ingestao-avaliacao
+      StageName: prod
+      TracingEnabled: true
+      # Limita o uso para proteger o custo e o banco de dados de excesso de requisicoes
+      MethodSettings:
+        - HttpMethod: '*'
+          ResourcePath: '/*'
+          ThrottlingRateLimit: 10
+          ThrottlingBurstLimit: 20
+          MetricsEnabled: true
+
+  IngestaoAvaliacaoFunction:
+    Type: AWS::Serverless::Function
+    DependsOn: IngestaoAvaliacaoLogGroup
+    Properties:
+      FunctionName: ingestao-avaliacao
+      Description: Recebe avaliacoes pelo API Gateway, classifica a urgencia, grava no DynamoDB e avisa a fila quando e critica
+      CodeUri: .
+      Handler: ingestao_avaliacao.handler.IngestaoAvaliacaoHandler::handleRequest
+      Runtime: java21
+      MemorySize: 512
+      Timeout: 30
+      Role: !GetAtt IngestaoAvaliacaoRole.Arn
+      Tracing: Active
+      AutoPublishAlias: live
+      SnapStart:
+        ApplyOn: PublishedVersions
+      Environment:
+        Variables:
+          TABELA_AVALIACOES: !Ref TabelaAvaliacoes
+          SQS_QUEUE_URL: !ImportValue tech4-filas-notificacoes-criticas-url
+      Events:
+        PostAvaliacao:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AvaliacaoApi
+            Path: /avaliacao
+            Method: post
+
+  TopicoAlarmes:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: ingestao-avaliacao-alarmes
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AdminEmail
+
+  # Avaliacao critica gravada cujo aviso nao chegou a fila: o administrador nao seria notificado
+  FiltroFalhasNotificacao:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref IngestaoAvaliacaoLogGroup
+      FilterPattern: '"ingestao.falha_notificacao"'
+      MetricTransformations:
+        - MetricNamespace: TechChallenge/Ingestao
+          MetricName: FalhasNotificacao
+          MetricValue: '1'
+          DefaultValue: 0
+
+  AlarmeFalhasNotificacao:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ingestao-avaliacao-falha-notificacao
+      AlarmDescription: Avaliacao critica gravada, mas nao publicada na fila de notificacoes
+      Namespace: TechChallenge/Ingestao
+      MetricName: FalhasNotificacao
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref TopicoAlarmes
+
+  AlarmeErrosLambda:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ingestao-avaliacao-erros-lambda
+      AlarmDescription: Execucoes da Lambda encerradas com erro
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IngestaoAvaliacaoFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref TopicoAlarmes
+
+  # A API devolve 500 tanto para falha de infraestrutura quanto para falha do aviso a fila
+  AlarmeErros5xxApi:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ingestao-avaliacao-api-5xx
+      AlarmDescription: Respostas 5xx da API de avaliacoes
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - Name: ApiName
+          Value: ingestao-avaliacao
+        - Name: Stage
+          Value: prod
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref TopicoAlarmes
+
+  DashboardIngestao:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: ingestao-avaliacao
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda: invocacoes e erros", "region": "${AWS::Region}", "stat": "Sum", "period": 300,
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "ingestao-avaliacao"],
+                  [".", "Errors", ".", "."],
+                  ["TechChallenge/Ingestao", "FalhasNotificacao"]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda: duracao (ms)", "region": "${AWS::Region}", "stat": "Average", "period": 300,
+                "metrics": [["AWS/Lambda", "Duration", "FunctionName", "ingestao-avaliacao"]]
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 6, "width": 24, "height": 6,
+              "properties": {
+                "title": "API Gateway: requisicoes, erros 4xx e 5xx", "region": "${AWS::Region}", "stat": "Sum", "period": 300,
+                "metrics": [
+                  ["AWS/ApiGateway", "Count", "ApiName", "ingestao-avaliacao", "Stage", "prod"],
+                  [".", "4XXError", ".", ".", ".", "."],
+                  [".", "5XXError", ".", ".", ".", "."]
+                ]
+              }
+            }
+          ]
+        }
+
+Outputs:
+  UrlDaApi:
+    Description: Endpoint para enviar avaliacoes (POST com descricao e nota)
+    Value: !Sub https://${AvaliacaoApi}.execute-api.${AWS::Region}.amazonaws.com/prod/avaliacao
+  TabelaNome:
+    Description: Tabela DynamoDB lida pelo tech4-relatorio-semanal
+    Value: !Ref TabelaAvaliacoesDynamoDB
+  FuncaoNome:
+    Description: Nome da funcao
+    Value: !Ref IngestaoAvaliacaoFunction
